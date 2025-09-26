@@ -1,0 +1,17 @@
+# TSWE Holdings Crawler 配置檔
+
+# 瀏覽器設定
+headless: true            # 是否使用無頭模式
+retry: 1                  # 每個代號的重試次數
+throttle_sec: 1.5         # 每個代號間的等待秒數
+
+# 路徑設定
+paths:
+  downloads: "./downloads"  # CSV 下載目錄
+  outputs: "./outputs"      # Excel 輸出目錄
+  logs: "./logs"           # 日誌目錄
+
+# 輸出設定
+output:
+  per_sheet: false                    # 是否每個代號建立獨立工作表
+  filename_prefix: "董監事持股_批次_"   # 輸出檔案名稱前綴
