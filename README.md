@@ -69,6 +69,3 @@ python src/fixed_input_crawler.py --codes-file 股票代號.txt
 - **ChromeDriver issues**: Ensure ChromeDriver matches Chrome version.
 
 ---
-
-## License
-MIT (adjust if needed)

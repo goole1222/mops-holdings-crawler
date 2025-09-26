@@ -70,5 +70,3 @@ python src/fixed_input_crawler.py --codes-file 股票代號.txt
 
 ---
 
-## 授權
-MIT License（或依需要調整）
