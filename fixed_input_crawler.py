@@ -16,7 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
 import os
 import glob
 from datetime import datetime
@@ -32,6 +32,7 @@ class FixedInputCrawler:
         self.driver = None
         self.all_data = {}
         self.failed_codes = []
+        self.processed_count = 0  # 已處理的股票數量計數器
 
         # 设置下载目录
         self.download_dir = os.path.join(os.getcwd(), "downloads")
@@ -149,19 +150,31 @@ class FixedInputCrawler:
         self.logger = logging.getLogger(__name__)
 
     def setup_chrome(self):
-        """设置Chrome选项"""
+        """设置Chrome选项 - 使用更穩定的 headless 模式"""
         options = Options()
+        # 基礎穩定性設定
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
+        options.add_argument('--headless=new')  # 使用新版 headless 模式
+        options.add_argument('--disable-features=VizDisplayCompositor')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-plugins')
+        options.add_argument('--disable-images')  # 關閉圖片載入
+        options.add_argument('--disable-javascript')
+        options.add_argument('--disable-background-timer-throttling')
+        options.add_argument('--disable-renderer-backgrounding')
+        options.add_argument('--disable-backgrounding-occluded-windows')
         options.add_argument('--ignore-certificate-errors')
         options.add_argument('--ignore-ssl-errors')
         options.add_argument('--allow-running-insecure-content')
         options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         options.add_argument('--window-size=1920,1080')
-        options.add_argument('--start-maximized')
         options.add_argument('--log-level=3')
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        # 記憶體優化
+        options.add_argument('--max_old_space_size=4096')
+        options.add_argument('--memory-pressure-off')
 
         # 设置自动下载选项
         prefs = {
@@ -188,6 +201,57 @@ class FixedInputCrawler:
         except Exception as e:
             self.logger.error(f"❌ 浏览器初始化失败: {e}")
             return False
+
+    def restart_driver(self):
+        """重啟瀏覽器驅動"""
+        try:
+            self.logger.info("♻️ 正在重啟瀏覽器...")
+            if self.driver:
+                try:
+                    self.driver.quit()
+                except:
+                    pass
+                self.driver = None
+
+            # 短暫等待確保資源釋放
+            time.sleep(2)
+
+            # 重新初始化
+            if self.init_driver():
+                self.logger.info("♻️ 瀏覽器重啟成功")
+                return True
+            else:
+                self.logger.error("♻️ 瀏覽器重啟失敗")
+                return False
+        except Exception as e:
+            self.logger.error(f"♻️ 重啟瀏覽器時發生錯誤: {e}")
+            return False
+
+    def check_driver_alive(self):
+        """檢查瀏覽器驅動是否仍可用"""
+        try:
+            if self.driver is None:
+                return False
+            # 嘗試獲取當前URL來測試連接
+            _ = self.driver.current_url
+            return True
+        except (WebDriverException, Exception):
+            return False
+
+    def ensure_single_tab(self):
+        """確保只有一個分頁開啟"""
+        try:
+            if self.driver and len(self.driver.window_handles) > 1:
+                # 關閉除了第一個之外的所有分頁
+                main_handle = self.driver.window_handles[0]
+                for handle in self.driver.window_handles[1:]:
+                    self.driver.switch_to.window(handle)
+                    self.driver.close()
+                # 切回主分頁
+                self.driver.switch_to.window(main_handle)
+                self.logger.info("🗂️ 已清理多餘分頁，保留單一分頁")
+        except Exception as e:
+            self.logger.warning(f"⚠️ 清理分頁時發生錯誤: {e}")
 
     def navigate_to_target_page(self):
         """导航到董監事持股餘額页面"""
@@ -981,12 +1045,21 @@ class FixedInputCrawler:
             self.logger.error(f"❌ 数据提取失败: {e}")
             return None
 
-    def process_single_stock(self, stock_code):
+    def process_single_stock(self, stock_code, is_retry=False):
         """处理单个股票的完整流程"""
         try:
+            retry_msg = "⚠️ Chrome 崩潰，自動重試" if is_retry else ""
             self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"📈 开始处理股票: {stock_code}")
+            self.logger.info(f"📈 开始处理股票: {stock_code} {retry_msg}")
             self.logger.info(f"{'='*60}")
+
+            # 確保只有一個分頁
+            self.ensure_single_tab()
+
+            # 檢查瀏覽器是否正常
+            if not self.check_driver_alive():
+                self.logger.error(f"❌ 瀏覽器驅動已斷線，處理股票 {stock_code} 失敗")
+                return False
 
             # 导航到目标页面
             if not self.navigate_to_target_page():
@@ -1027,8 +1100,11 @@ class FixedInputCrawler:
                 self.logger.error(f"❌ 股票 {stock_code} 所有數據提取方式都失敗")
                 return False
 
-        except Exception as e:
-            self.logger.error(f"❌ 处理股票 {stock_code} 异常: {e}")
+        except (WebDriverException, Exception) as e:
+            if "chrome not reachable" in str(e).lower() or "session deleted" in str(e).lower():
+                self.logger.error(f"⚠️ Chrome 崩潰檢測到: {e}")
+            else:
+                self.logger.error(f"❌ 处理股票 {stock_code} 异常: {e}")
             return False
 
     def save_to_excel(self, output_path, make_per_sheet=False):
@@ -1159,20 +1235,53 @@ class FixedInputCrawler:
             out_path = f"董監事持股_合併_{ts}.xlsx"
 
         success_cnt = 0
+        self.processed_count = 0  # 重置計數器
+
         for idx, code in enumerate(pending, 1):
+            # 每處理 200 個股票就自動重啟瀏覽器
+            if self.processed_count > 0 and self.processed_count % 200 == 0:
+                self.logger.info(f"♻️ 已處理 {self.processed_count} 個股票，自動重啟瀏覽器")
+                if not self.restart_driver():
+                    self.logger.error("♻️ 瀏覽器重啟失敗，終止程序")
+                    break
+
             ok = False
             for r in range(retry + 1):
-                self.logger.info(f"[{idx}/{len(pending)}] ▶︎ {code}（重試 {r}/{retry}）")
-                ok = self.process_single_stock(code)  # 內含 CSV/備援解析
-                if ok and code in self.all_data:
-                    # 立刻寫入 Excel（合併表），並標記 processed
-                    df = self.all_data[code][["股票代號","姓名","目前持股"]].copy()
-                    self.append_to_master_excel(out_path, df)
-                    self.append_processed_code(code)
-                    # 釋放該代號的暫存以省記憶體
-                    del self.all_data[code]
-                    success_cnt += 1
-                    break
+                is_retry = r > 0
+                if is_retry:
+                    self.logger.info(f"[{idx}/{len(pending)}] ▶︎ {code}（重試 {r}/{retry}）")
+                else:
+                    self.logger.info(f"[{idx}/{len(pending)}] ▶︎ {code}")
+
+                # 檢查瀏覽器狀態，如果崩潰則重啟
+                if not self.check_driver_alive():
+                    self.logger.warning(f"⚠️ Chrome 崩潰檢測到，正在重啟瀏覽器...")
+                    if not self.restart_driver():
+                        self.logger.error(f"⚠️ Chrome 重啟失敗，跳過股票 {code}")
+                        break
+
+                try:
+                    ok = self.process_single_stock(code, is_retry=is_retry)  # 內含 CSV/備援解析
+                    if ok and code in self.all_data:
+                        # 立刻寫入 Excel（合併表），並標記 processed
+                        df = self.all_data[code][["股票代號","姓名","目前持股"]].copy()
+                        self.append_to_master_excel(out_path, df)
+                        self.append_processed_code(code)
+                        # 釋放該代號的暫存以省記憶體
+                        del self.all_data[code]
+                        success_cnt += 1
+                        self.processed_count += 1
+                        break
+                except (WebDriverException, Exception) as e:
+                    if "chrome not reachable" in str(e).lower() or "session deleted" in str(e).lower():
+                        self.logger.warning(f"⚠️ Chrome 崩潰，準備重試: {e}")
+                        if not self.restart_driver():
+                            self.logger.error(f"⚠️ Chrome 重啟失敗")
+                            break
+                    else:
+                        self.logger.error(f"❌ 處理股票 {code} 時發生異常: {e}")
+                        break
+
                 time.sleep(2)
 
             if not ok:
